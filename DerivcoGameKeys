@@ -1,0 +1,57 @@
+--SET StartDate = '2025-04-11'; -- Will pull anything that was created from this date onwards
+--SET UpToDate = '2025-04-15'; --Up to this date 
+
+WITH TournamentUpdate AS    (
+                            SELECT
+                                        TournamentID,
+                                        MAX(CAST(Updated 
+                                            AS NUMBER))                             AS LastUpdated -- Convert UPDATED to numeric for comparison
+                            FROM        DERIVCO.CORE.VW_GGL_TOURNAMENT_CONFIG C
+                            GROUP BY    TournamentID
+                            ),
+
+
+    LatestGameState   AS    (
+                            SELECT      TournamentGameKey,
+                                        MAX(DateAdded)                              AS LatestDateAdded
+                            FROM        DERIVCO.CORE.VW_GGL_TOURNAMENT_GAME_MAP
+                            GROUP BY    TournamentGameKey
+                            ),
+                            
+    FilteredGames     AS    (
+                            SELECT      G.ModuleID,
+                                        G.ClientID,
+                                        G.TournamentGameKey,
+                                        G.DateAdded,
+                                        G._Deleted,
+                                        G.TournamentID
+                            FROM        DERIVCO.CORE.VW_GGL_TOURNAMENT_GAME_MAP G
+                            JOIN        LatestGameState LGS ON  G.TournamentGameKey =   LGS.TournamentGameKey
+                            AND                                 G.DateAdded         =   LGS.LatestDateAdded
+                        )
+
+                        
+-- FINAL OUTPUT
+
+    SELECT
+                DISTINCT(GN.CASINOGAMEMODULESKINNAME) AS GMM_REPORTINGNAME,
+                FG.TournamentID,
+                FG.ModuleID || FG.ClientID                               AS GameKey,
+                TO_TIMESTAMP(FG.DateAdded / 1000000000)                  AS DateAdded -- Converting DateAdded,
+
+
+
+    FROM        FilteredGames FG
+    JOIN        TournamentUpdate TU ON FG.TournamentID = TU.TournamentID
+    INNER JOIN  MASTERDIM.COMMERCIAL.VW_DIM_GAME GN ON FG.moduleID || FG.clientID = GN.moduleID || GN.clientID
+    INNER JOIN  DERIVCO.CORE.VW_GGL_TOURNAMENT_CONFIG C ON C.TOURNAMENTID = TU.TournamentID
+    WHERE C.NAME NOT LIKE 'GGL -%'
+    
+
+    GROUP BY    FG.TournamentID,
+                FG.ModuleID || FG.clientID,
+                TO_TIMESTAMP(FG.DateAdded / 1000000000),
+                GN.CASINOGAMEMODULESKINNAME  -- Ensuring only one row per TournamentID + GameKey,
+    
+    ORDER BY    FG.tournamentID,
+                GameKey;
