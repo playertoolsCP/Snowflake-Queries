@@ -1,0 +1,136 @@
+WITH BaseTournamentData AS (
+  SELECT 
+    cf.TOURNAMENTID,
+    cd.OPERATORBILLINGNAME       AS Operator,
+
+    -- raw timestamps
+    TO_TIMESTAMP(cf.startdateutc/1000) AS RawStartDate,
+    TO_TIMESTAMP(cf.enddateutc  /1000) AS RawEndDate,
+
+    cf.NAME,
+    cf.DESCRIPTION,
+    TO_TIMESTAMP(cf.updated/1000000000) AS UpdatedDate,
+    TO_TIMESTAMP(cf.created/1000000000) AS CreatedDate,
+
+    -- preserve the numeric ID
+    cf.STATUSID,
+
+    -- re-add the human-friendly Status label
+    CASE
+      WHEN cf.STATUSID = 0 THEN 'Draft'
+      WHEN cf.STATUSID = 1 
+           AND TO_TIMESTAMP(cf.startdateutc/1000) > CURRENT_TIMESTAMP() 
+        THEN 'Scheduled'
+      WHEN cf.STATUSID = 1 
+           AND TO_TIMESTAMP(cf.startdateutc/1000) <= CURRENT_TIMESTAMP() 
+           AND TO_TIMESTAMP(cf.enddateutc/1000) > CURRENT_TIMESTAMP() 
+        THEN 'LIVE'
+      WHEN cf.STATUSID = 1 
+           AND TO_TIMESTAMP(cf.enddateutc/1000) <= CURRENT_TIMESTAMP() 
+        THEN 'Completed'
+      WHEN cf.STATUSID = 2 THEN 'Terminated'
+      WHEN cf.STATUSID = 3 THEN 'Deleted'
+      WHEN cf.STATUSID = 4 THEN 'Closed'
+      ELSE 'Unknown'
+    END AS Status,
+
+    cf.TYPEID,
+    CASE 
+      WHEN cf.TYPEID = 1 THEN 'Tournament'
+      WHEN cf.TYPEID = 3 THEN 'Prize Drop'
+      ELSE 'Other'
+    END AS Product,
+
+    cf.POOLCOST,
+    cf._DELETED,
+    cf.CREATORID,
+    cf.AUTOMATICOPTIN,
+    cf.AUDIENCETYPE,
+    cf.DELAYEDPAYOUTDURATION
+
+  FROM DERIVCO.CORE.VW_GGL_TOURNAMENT_CONFIG cf
+  LEFT JOIN DERIVCO.CORE.VW_GGL_TOURNAMENT_PRODUCT_MAP pm
+    ON cf.TOURNAMENTID = pm.TOURNAMENTID
+  LEFT JOIN MASTERDIM.COMMERCIAL.VW_DIM_CASINO cd
+    ON pm.PRODUCTID = cd.CASINOID
+
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY cf.TOURNAMENTID
+    ORDER BY TO_TIMESTAMP(cf.updated/1000000000) DESC
+  ) = 1
+),
+
+RolledInitial AS (
+  SELECT
+    *,
+    -- bump any start ≥ 22:00 → next day
+    CASE
+      WHEN DATE_PART('hour', RawStartDate) >= 22
+      THEN DATEADD('day', 1, CAST(RawStartDate AS DATE))
+      ELSE CAST(RawStartDate AS DATE)
+    END AS RolledStartInit,
+
+    -- roll any end < 03:00 → previous day
+    CASE
+      WHEN DATE_PART('hour', RawEndDate) < 3
+      THEN DATEADD('day', -1, CAST(RawEndDate AS DATE))
+      ELSE CAST(RawEndDate AS DATE)
+    END AS RolledEndInit
+
+  FROM BaseTournamentData
+),
+
+RolledFinal AS (
+  SELECT
+    *,
+    -- collapse ≤24h cross-midnight events that start ≥20:00 AND end <03:00
+    CASE
+      WHEN RawEndDate <= DATEADD('day',1,RawStartDate)
+       AND CAST(RawStartDate AS DATE) <> CAST(RawEndDate AS DATE)
+       AND DATE_PART('hour', RawStartDate) >= 20
+       AND DATE_PART('hour', RawEndDate  ) <  3
+      THEN CAST(RawStartDate AS DATE)
+      ELSE RolledStartInit
+    END AS RolledStartDate,
+
+    CASE
+      WHEN RawEndDate <= DATEADD('day',1,RawStartDate)
+       AND CAST(RawStartDate AS DATE) <> CAST(RawEndDate AS DATE)
+       AND DATE_PART('hour', RawStartDate) >= 20
+       AND DATE_PART('hour', RawEndDate  ) <  3
+      THEN CAST(RawStartDate AS DATE)
+      ELSE RolledEndInit
+    END AS RolledEndDate
+
+  FROM RolledInitial
+)
+
+SELECT
+  TournamentID,
+  Operator,
+  RawStartDate,
+  RawEndDate,
+  RolledStartDate,
+  RolledEndDate,
+  Name,
+  Description,
+  StatusID,
+  Status,         -- now back to text
+  TypeID,
+  Product,
+  PoolCost,
+  _Deleted,
+  CreatorID,
+  AutomaticOptIn,
+  AudienceType,
+  DelayedPayoutDuration,
+  UpdatedDate,
+  CreatedDate
+
+FROM RolledFinal
+WHERE StatusID IN (1)       -- Scheduled / LIVE / Completed
+  AND Name NOT LIKE '%test%'
+  AND Name NOT LIKE 'GGL -%'
+  AND StatusID  <> 3
+  
+ORDER BY RolledStartDate DESC;
